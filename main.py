@@ -1,195 +1,127 @@
 import os
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ContextTypes, filters
-)
-from dotenv import load_dotenv
+import json
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters
 from flask import Flask, jsonify
-from flask_cors import CORS
-import threading
+from dotenv import load_dotenv
 
-# Load environment variables
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")  # e.g. '@YourChannel'
-BOT_USERNAME = os.getenv("BOT_USERNAME")
-ADMIN_ID = int(os.getenv("ADMIN_ID"))
+ADMIN_ID = os.getenv("ADMIN_ID")
 
-# In-memory database
-users = {}
+users_file = "users.json"
+if not os.path.exists(users_file):
+    with open(users_file, "w") as f:
+        json.dump({}, f)
 
-def get_user(user_id):
-    if user_id not in users:
-        users[user_id] = {
-            "balance": 0.0,
-            "referrals": [],
-            "referred_by": None
-        }
-    return users[user_id]
+def load_users():
+    with open(users_file) as f:
+        return json.load(f)
 
-def get_ref_link(user_id):
-    return f"https://t.me/{BOT_USERNAME}?start={user_id}"
+def save_users(data):
+    with open(users_file, "w") as f:
+        json.dump(data, f, indent=2)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
-    if chat_member.status in ['left', 'kicked']:
-        join_button = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔐 Join Channel", url=f"https://t.me/{CHANNEL_ID[1:]}")],
-            [InlineKeyboardButton("✅ I've Joined", callback_data="check_join")]
-        ])
-        await update.message.reply_text("🔒 Please join our official channel to use the bot:", reply_markup=join_button)
-        return
+    users = load_users()
+    if str(user.id) not in users:
+        users[str(user.id)] = {
+            "name": user.full_name,
+            "balance": 0.00,
+            "referrals": 0,
+            "referred_by": None,
+        }
+        save_users(users)
 
-    if context.args:
-        ref_by = context.args[0]
-        if ref_by != str(user.id):
-            u = get_user(user.id)
-            if not u["referred_by"]:
-                u["referred_by"] = int(ref_by)
-                ref_user = get_user(int(ref_by))
-                if user.id not in ref_user["referrals"]:
-                    ref_user["referrals"].append(user.id)
-                    ref_user["balance"] += 0.05
+    reply_markup = InlineKeyboardMarkup([
+        [InlineKeyboardButton("💰 Balance", callback_data="balance")],
+        [InlineKeyboardButton("👥 Referral", callback_data="referral")],
+        [InlineKeyboardButton("🏦 Withdraw", callback_data="withdraw")]
+    ])
 
-    await send_home(update, context)
-
-async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    u = get_user(user.id)
-    text = (
-        f"👋 Welcome, {user.first_name}!\n"
-        f"👤 Username: @{user.username or 'N/A'}\n"
-        f"🆔 ID: {user.id}\n"
-        f"💰 Balance: ${u['balance']:.2f}\n"
-        f"👥 Total Referrals: {len(u['referrals'])}\n"
-        f"🔗 Referral Link: {get_ref_link(user.id)}"
+    await update.message.reply_text(
+        f"👋 Welcome, {user.first_name}!\n\n💡 Use the buttons below to navigate.",
+        reply_markup=reply_markup
     )
-    buttons = [[InlineKeyboardButton("💵 Withdraw", callback_data="withdraw")]]
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
-async def check_join(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    chat_member = await context.bot.get_chat_member(CHANNEL_ID, user.id)
-    if chat_member.status in ['left', 'kicked']:
-        await query.edit_message_text("❌ You haven't joined the channel yet.")
-    else:
-        await query.delete_message()
-        await send_home(update, context)
+    user_id = str(query.from_user.id)
+    users = load_users()
+    user_data = users.get(user_id, {})
 
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user = query.from_user
-    u = get_user(user.id)
-    if u["balance"] < 1:
-        await query.edit_message_text("⚠️ You need at least $1 to withdraw.")
-        return
+    if query.data == "balance":
+        await query.answer()
+        await query.edit_message_text(f"💰 Your balance: ${user_data.get('balance', 0):.2f}")
 
-    active_refs = [r for r in u["referrals"] if await context.bot.get_chat_member(CHANNEL_ID, r)]
-    if len(active_refs) < len(u["referrals"]):
-        await query.edit_message_text("❌ Some of your referred users are not active in the channel.")
-        return
-
-    buttons = [
-        [InlineKeyboardButton("📲 bKash", callback_data="bkash")],
-        [InlineKeyboardButton("💳 Nagad", callback_data="nagad")],
-        [InlineKeyboardButton("🔙 Back", callback_data="back_home")]
-    ]
-    await query.edit_message_text("🔔 Choose a withdrawal method:", reply_markup=InlineKeyboardMarkup(buttons))
-
-async def method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    method = query.data
-    context.user_data['method'] = method
-    context.user_data['next_step'] = 'ask_amount'
-    await query.edit_message_text("💸 Enter the amount to withdraw:")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = context.user_data
-    user_id = update.effective_user.id
-    u = get_user(user_id)
-
-    if user_data.get("next_step") == "ask_amount":
-        try:
-            amount = float(update.message.text)
-        except:
-            await update.message.reply_text("❌ Invalid amount. Enter a number.")
-            return
-        if amount > u["balance"]:
-            await update.message.reply_text("❌ You don't have enough balance.")
-            return
-        user_data['amount'] = amount
-        user_data['next_step'] = 'ask_number'
-        await update.message.reply_text("📱 Enter your number:")
-        return
-
-    if user_data.get("next_step") == "ask_number":
-        number = update.message.text
-        method = user_data['method']
-        amount = user_data['amount']
-        u["balance"] -= amount
-        user_data.clear()
-        await update.message.reply_text(
-            f"✅ Withdrawal request received.\n\n"
-            f"Method: {method.upper()}\n"
-            f"Amount: ${amount:.2f}\n"
-            f"Number: {number}\n\n"
-            f"💠 It will be processed soon."
+    elif query.data == "referral":
+        await query.answer()
+        ref_link = f"https://t.me/{context.bot.username}?start={user_id}"
+        await query.edit_message_text(
+            f"👥 Your Referrals: {user_data.get('referrals', 0)}\n🔗 Referral Link:\n{ref_link}"
         )
 
-async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_home(update, context)
+    elif query.data == "withdraw":
+        await query.answer()
+        await query.edit_message_text(
+            "🏦 Withdraw feature coming soon. Stay tuned!"
+        )
 
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def referral_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if user.id != ADMIN_ID:
-        await update.message.reply_text("⛔️ You are not authorized.")
-        return
+    users = load_users()
+    args = context.args
 
-    if not users:
-        await update.message.reply_text("❗ No users found yet.")
-        return
+    referred_by = args[0] if args else None
+    user_id = str(user.id)
 
-    text = "📊 All User Stats:\n\n"
-    for uid, data in users.items():
-        text += (
-            f"🆔 ID: {uid}\n"
-            f"💰 Balance: ${data['balance']:.2f}\n"
-            f"👥 Referrals: {len(data['referrals'])}\n"
-            f"Referred By: {data['referred_by']}\n\n"
-        )
-    await update.message.reply_text(text)
+    if user_id not in users:
+        users[user_id] = {
+            "name": user.full_name,
+            "balance": 0.00,
+            "referrals": 0,
+            "referred_by": referred_by if referred_by != user_id else None,
+        }
 
-# Flask admin API
-app = Flask(__name__)
-CORS(app)
+        if referred_by and referred_by in users:
+            users[referred_by]["referrals"] += 1
+            users[referred_by]["balance"] += 0.05  # $0.05 bonus per referral
 
-@app.route("/admin/users")
-def get_users():
+        save_users(users)
+
+    await start(update, context)
+
+# === Flask Admin Panel ===
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def index():
+    return "✅ SLI Bot is running"
+
+@flask_app.route('/admin')
+def admin():
+    users = load_users()
     return jsonify(users)
 
-def run_admin_server():
-    app.run(port=8000)
+# === Run Flask in a Thread ===
+import threading
 
-def main():
-    threading.Thread(target=run_admin_server).start()
-    app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
+def run_flask():
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
 
-    app_telegram.add_handler(CommandHandler("start", start))
-    app_telegram.add_handler(CallbackQueryHandler(check_join, pattern="check_join"))
-    app_telegram.add_handler(CallbackQueryHandler(withdraw, pattern="withdraw"))
-    app_telegram.add_handler(CallbackQueryHandler(method_selected, pattern="bkash|nagad"))
-    app_telegram.add_handler(CallbackQueryHandler(go_back, pattern="back_home"))
-    app_telegram.add_handler(CommandHandler("admin", admin_panel))
-    app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+# === Start Bot ===
+async def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", referral_handler))
+    app.add_handler(CallbackQueryHandler(button_handler))
 
-    print("✅ Bot is running...")
-    app_telegram.run_polling()
+    thread = threading.Thread(target=run_flask)
+    thread.start()
 
-if __name__ == "__main__":
-    main()
+    await app.run_polling()
+
+if __name__ == '__main__':
+    import asyncio
+    asyncio.run(main())
