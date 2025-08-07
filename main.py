@@ -1,4 +1,3 @@
-
 import os
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -13,7 +12,7 @@ import threading
 # Load environment variables
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = os.getenv("CHANNEL_ID")
+CHANNEL_ID = os.getenv("CHANNEL_ID")  # e.g. '@YourChannel'
 BOT_USERNAME = os.getenv("BOT_USERNAME")
 ADMIN_ID = int(os.getenv("ADMIN_ID"))
 
@@ -50,8 +49,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not u["referred_by"]:
                 u["referred_by"] = int(ref_by)
                 ref_user = get_user(int(ref_by))
-                ref_user["referrals"].append(user.id)
-                ref_user["balance"] += 0.05
+                if user.id not in ref_user["referrals"]:
+                    ref_user["referrals"].append(user.id)
+                    ref_user["balance"] += 0.05
 
     await send_home(update, context)
 
@@ -59,19 +59,12 @@ async def send_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     u = get_user(user.id)
     text = (
-        f"👋 Welcome, {user.first_name}!
-
-"
-        f"👤 Username: @{user.username or 'N/A'}
-"
-        f"🆔 ID: {user.id}
-"
-        f"💰 Balance: ${u['balance']:.2f}
-"
-        f"👥 Total Referrals: {len(u['referrals'])}
-"
-        f"🔗 Referral Link:
-{get_ref_link(user.id)}"
+        f"👋 Welcome, {user.first_name}!\n"
+        f"👤 Username: @{user.username or 'N/A'}\n"
+        f"🆔 ID: {user.id}\n"
+        f"💰 Balance: ${u['balance']:.2f}\n"
+        f"👥 Total Referrals: {len(u['referrals'])}\n"
+        f"🔗 Referral Link: {get_ref_link(user.id)}"
     )
     buttons = [[InlineKeyboardButton("💵 Withdraw", callback_data="withdraw")]]
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
@@ -113,13 +106,14 @@ async def method_selected(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     method = query.data
     context.user_data['method'] = method
-    await query.edit_message_text("💸 Enter the amount to withdraw:")
     context.user_data['next_step'] = 'ask_amount'
+    await query.edit_message_text("💸 Enter the amount to withdraw:")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data = context.user_data
     user_id = update.effective_user.id
     u = get_user(user_id)
+
     if user_data.get("next_step") == "ask_amount":
         try:
             amount = float(update.message.text)
@@ -141,13 +135,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         u["balance"] -= amount
         user_data.clear()
         await update.message.reply_text(
-            f"✅ Withdrawal request received.
-
-Method: {method.upper()}
-Amount: ${amount}
-Number: {number}
-
-💠 It will be processed soon."
+            f"✅ Withdrawal request received.\n\n"
+            f"Method: {method.upper()}\n"
+            f"Amount: ${amount:.2f}\n"
+            f"Number: {number}\n\n"
+            f"💠 It will be processed soon."
         )
 
 async def go_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -158,26 +150,22 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id != ADMIN_ID:
         await update.message.reply_text("⛔️ You are not authorized.")
         return
-    text = "📊 All User Stats:
 
-"
+    if not users:
+        await update.message.reply_text("❗ No users found yet.")
+        return
+
+    text = "📊 All User Stats:\n\n"
     for uid, data in users.items():
         text += (
-            f"🆔 ID: {uid}
-"
-            f"💰 Balance: ${data['balance']:.2f}
-"
-            f"👥 Referrals: {len(data['referrals'])}
-"
-            f"Referred By: {data['referred_by']}
-
-"
+            f"🆔 ID: {uid}\n"
+            f"💰 Balance: ${data['balance']:.2f}\n"
+            f"👥 Referrals: {len(data['referrals'])}\n"
+            f"Referred By: {data['referred_by']}\n\n"
         )
-    if not users:
-        text = "❗ No users found yet."
     await update.message.reply_text(text)
 
-# Flask admin API server
+# Flask admin API
 app = Flask(__name__)
 CORS(app)
 
@@ -191,6 +179,7 @@ def run_admin_server():
 def main():
     threading.Thread(target=run_admin_server).start()
     app_telegram = ApplicationBuilder().token(BOT_TOKEN).build()
+
     app_telegram.add_handler(CommandHandler("start", start))
     app_telegram.add_handler(CallbackQueryHandler(check_join, pattern="check_join"))
     app_telegram.add_handler(CallbackQueryHandler(withdraw, pattern="withdraw"))
@@ -198,6 +187,7 @@ def main():
     app_telegram.add_handler(CallbackQueryHandler(go_back, pattern="back_home"))
     app_telegram.add_handler(CommandHandler("admin", admin_panel))
     app_telegram.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
     print("✅ Bot is running...")
     app_telegram.run_polling()
 
